@@ -1,10 +1,14 @@
 import asyncio
 import requests
-from aiogram import Bot, Dispatcher
+import random
+from aiogram import Bot, Dispatcher, F
 from aiogram.filters import CommandStart, Command
-from aiogram.types import Message
+from aiogram.types import Message, FSInputFile
 from googletrans import Translator
+from gtts import gTTS
+import os
 from config import TG_TOKEN, WEATHER_API_KEY, GIPHY_API_KEY
+
 
 bot = Bot(token=TG_TOKEN)
 dp = Dispatcher()
@@ -12,17 +16,49 @@ translator = Translator()
 
 @dp.message(CommandStart())
 async def cmd_start(message: Message):
-    await message.answer("Привет, я бот, который сообщает погоду в любом городе.")
+    await message.answer(f"Привет, {message.from_user.first_name}, я не волшебник, я только учусь. \nВведи /help для подробностей.")
 
 @dp.message(Command("help"))
 async def cmd_help(message: Message):
-    await message.answer("Я умею выполнять команды: \n/start - запуск \n/help - помощь \n/city - поиск погоды в городе \nНазвание города нужно вводить после команды /city")
+    await message.answer("Я умею выполнять команды: "
+                         "\n/start - поприветствую тебя "
+                         "\n/help - расскажу, что к чему "
+                         "\n/photo - оценю твою фотку "
+                         "\n/english - переведу твою фразу на английский язык "
+                         "\n/city - найду погоду в любом городе "
+                         "\nНазвание города нужно вводить после команды /city")
 
+
+@dp.message(F.photo)
+async def cmd_photo(message: Message):
+    list = ['Ого, какая фотка!', 'Что это?', 'Не отправляй мне такое больше', 'Это шедевр!']
+    rand_answ = random.choice(list)
+    tts = gTTS(text=rand_answ, lang='ru')
+    tts.save('tts.mp3')
+    audio = FSInputFile('tts.mp3')
+    await bot.send_audio(message.chat.id, audio)
+    os.remove('tts.mp3')
+    await bot.download(message.photo[-1],destination=f'img/{message.photo[-1].file_id}.jpg')
+
+@dp.message(Command("english"))
+async def cmd_english(message: Message):
+    ru_text = message.text.split(' ', 1)[1] if len(message.text.split()) > 1 else None
+    if ru_text:
+        try:
+            translated = translator.translate(ru_text, dest='en')
+            if translated and translated.text: 
+                en_text = translated.text
+                await message.answer(en_text)
+            else:
+                await message.answer("Не удалось выполнить перевод. Попробуй еще раз.")
+        except Exception as e:
+            await message.answer(f"Произошла ошибка при переводе: {e}")
+    else:
+        await message.answer("Сначала команда /english, после нее через пробел - фраза на русском.")
 
 @dp.message(Command("city"))
 async def cmd_city(message: Message):
     city = message.text.split(' ', 1)[1] if len(message.text.split()) > 1 else None
-
     if city:
         url = f"https://api.openweathermap.org/data/2.5/weather?q={city}&appid={WEATHER_API_KEY}&units=metric"
         response = requests.get(url)
@@ -38,10 +74,9 @@ async def cmd_city(message: Message):
                 f"Температура в городе {city} {data['main']['temp']}°C, {translated_description}")
         else:
             await message.answer(
-                f"Извините, не удалось получить данные о погоде для города {city}.\nВот Вам за это случайная гифка: \n{get_random_gif()}")
+                f"Извини, не удалось получить данные о погоде для города {city}.\nЛови за это случайнкю гифку: \n{get_random_gif()}")
     else:
-        await message.answer("Пожалуйста, укажите название города после команды /city.")
-
+        await message.answer("Сначала команда /city, после нее через пробел - город.")
 
 def get_random_gif():
     url = f'http://api.giphy.com/v1/gifs/random?api_key={GIPHY_API_KEY}'
