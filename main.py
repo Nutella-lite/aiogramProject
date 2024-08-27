@@ -46,7 +46,7 @@ async def cmd_english(message: Message):
     if ru_text:
         try:
             translated = translator.translate(ru_text, dest='en')
-            if translated and translated.text: 
+            if translated and translated.text:
                 en_text = translated.text
                 await message.answer(en_text)
             else:
