@@ -7,14 +7,12 @@ from aiogram.types import Message, ReplyKeyboardMarkup, KeyboardButton, Callback
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
-from aiogram.utils.keyboard import ReplyKeyboardBuilder
 import aiosqlite
 import aiohttp
-import os
+from aiogram.fsm.state import State, StatesGroup
 from config import TOKEN, EXCHANGE_API_KEY
 
 logging.basicConfig(level=logging.INFO)
-
 bot = Bot(token=TOKEN)
 dp = Dispatcher(storage=MemoryStorage())
 
@@ -39,29 +37,41 @@ keyboard_registered = ReplyKeyboardMarkup(
     resize_keyboard=True
 )
 
+finish_button = KeyboardButton(text="Завершить ввод")
+cancel_keyboard = ReplyKeyboardMarkup(resize_keyboard=True).add(finish_button)
+
 # FSM для личных финансов
 class FinancesForm(StatesGroup):
-    category = State()
-    expenses = State()
-    counter = State()
+    choose_category = State()
+    new_category = State()
+    enter_amount = State()
 
 # Создание таблицы пользователей
+# В функции init_db() добавьте создание таблицы expenses
 async def init_db():
     async with aiosqlite.connect('user.db') as db:
         await db.execute('''
             CREATE TABLE IF NOT EXISTS users (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 telegram_id INTEGER UNIQUE,
-                name TEXT,
-                categories TEXT,
-                expenses TEXT
+                name TEXT
+            )
+        ''')
+        await db.execute('''
+            CREATE TABLE IF NOT EXISTS expenses (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER,
+                category TEXT,
+                amount REAL,
+                FOREIGN KEY (user_id) REFERENCES users (id)
             )
         ''')
         await db.commit()
 
+
 # Обработчик команды /start
 @dp.message(CommandStart())
-async def send_start(message: Message):
+async def cmd_start(message: Message):
     telegram_id = message.from_user.id
     async with aiosqlite.connect('user.db') as db:
         async with db.execute('SELECT * FROM users WHERE telegram_id = ?', (telegram_id,)) as cursor:
@@ -124,49 +134,84 @@ async def send_tips(message: Message):
 # Обработчик личных финансов
 @dp.message(F.text == "Личные финансы")
 async def finances_start(message: Message, state: FSMContext):
-    await state.update_data(categories=[], expenses=[], counter=1)
-    await state.set_state(FinancesForm.category)
-    await message.reply("Введите название категории расхода №1:")
+    telegram_id = message.from_user.id
+    async with aiosqlite.connect('user.db') as db:
+        # Получаем ID пользователя из базы данных
+        async with db.execute('SELECT id FROM users WHERE telegram_id = ?', (telegram_id,)) as cursor:
+            user = await cursor.fetchone()
+        if not user:
+            await message.reply("Вы не зарегистрированы. Пожалуйста, используйте кнопку \"Регистрация\".")
+            return
+        user_id = user[0]
+        # Получаем список категорий пользователя
+        async with db.execute('SELECT DISTINCT category FROM expenses WHERE user_id = ?', (user_id,)) as cursor:
+            categories = await cursor.fetchall()
+    if categories:
+        # Если есть сохраненные категории, предлагаем их выбрать или добавить новую
+        category_buttons = [KeyboardButton(text=category[0]) for category in categories]
+        category_buttons.append(KeyboardButton(text="Добавить новую категорию"))
+        category_buttons.append(finish_button)
+        categories_keyboard = ReplyKeyboardMarkup(resize_keyboard=True)
+        categories_keyboard.add(*category_buttons)
+        await message.reply("Выберите категорию или добавьте новую:", reply_markup=categories_keyboard)
+        await state.set_state(FinancesForm.choose_category)
+    else:
+        # Если нет сохраненных категорий, просим добавить новую
+        await message.reply("Введите название категории расходов.", reply_markup=cancel_keyboard)
+        await state.set_state(FinancesForm.new_category)
+
 
 # Универсальный обработчик для состояний FinancesForm
-@dp.message(F.state.in_([FinancesForm.category, FinancesForm.expenses]))
-async def finances_handler(message: Message, state: FSMContext):
-    data = await state.get_data()
-    counter = data.get('counter', 1)
-    categories = data.get('categories', [])
-    expenses = data.get('expenses', [])
+@dp.message(F.state == FinancesForm.choose_category)
+async def process_choose_category(message: Message, state: FSMContext):
+    category = message.text
+    if category == "Добавить новую категорию":
+        await message.reply("Введите название новой категории расходов.", reply_markup=cancel_keyboard)
+        await state.set_state(FinancesForm.new_category)
+    elif category == "Завершить ввод":
+        await message.reply("Ввод завершен.", reply_markup=keyboard_registered)
+        await state.clear()
+    else:
+        # Пользователь выбрал существующую категорию
+        await state.update_data(category=category)
+        await message.reply(f"Введите сумму расходов для категории '{category}'.", reply_markup=cancel_keyboard)
+        await state.set_state(FinancesForm.enter_amount)
 
-    current_state = await state.get_state()
-    if current_state == FinancesForm.category.state:
-        categories.append(message.text)
-        await state.update_data(categories=categories)
-        await state.set_state(FinancesForm.expenses)
-        await message.reply(f"Введите сумму расходов для категории '{message.text}':")
-    elif current_state == FinancesForm.expenses.state:
-        try:
-            expense = float(message.text.replace(',', '.'))
-            expenses.append(expense)
-            await state.update_data(expenses=expenses)
-            counter += 1
-            await state.update_data(counter=counter)
-            if counter <= 3:
-                await state.set_state(FinancesForm.category)
-                await message.reply(f"Введите название категории расхода №{counter}:")
-            else:
-                # Сохранение данных в БД
-                telegram_id = message.from_user.id
-                categories_str = ';'.join(data['categories'])
-                expenses_str = ';'.join(map(str, data['expenses']))
-                async with aiosqlite.connect('user.db') as db:
-                    await db.execute(
-                        '''UPDATE users SET categories = ?, expenses = ? WHERE telegram_id = ?''',
-                        (categories_str, expenses_str, telegram_id)
-                    )
-                    await db.commit()
-                await state.clear()
-                await message.answer("Категории и расходы сохранены!")
-        except ValueError:
-            await message.reply("Пожалуйста, введите числовое значение для расходов.")
+@dp.message(F.state == FinancesForm.new_category)
+async def process_new_category(message: Message, state: FSMContext):
+    category = message.text
+    if category == "Завершить ввод":
+        await message.reply("Ввод завершен.", reply_markup=keyboard_registered)
+        await state.clear()
+    else:
+        await state.update_data(category=category)
+        await message.reply(f"Введите сумму расходов для категории '{category}'.", reply_markup=cancel_keyboard)
+        await state.set_state(FinancesForm.enter_amount)
+
+@dp.message(F.state == FinancesForm.enter_amount)
+async def process_enter_amount(message: Message, state: FSMContext):
+    if message.text == "Завершить ввод":
+        await message.reply("Ввод завершен.", reply_markup=keyboard_registered)
+        await state.clear()
+        return
+    try:
+        amount = float(message.text.replace(',', '.'))
+        data = await state.get_data()
+        category = data['category']
+        telegram_id = message.from_user.id
+        async with aiosqlite.connect('user.db') as db:
+            # Получаем ID пользователя
+            async with db.execute('SELECT id FROM users WHERE telegram_id = ?', (telegram_id,)) as cursor:
+                user = await cursor.fetchone()
+            user_id = user[0]
+            # Сохраняем расход в базе данных
+            await db.execute('INSERT INTO expenses (user_id, category, amount) VALUES (?, ?, ?)', (user_id, category, amount))
+            await db.commit()
+        await message.reply(f"Расход в категории '{category}' на сумму {amount} сохранен.\nВы можете добавить еще расходы или нажать 'Завершить ввод' для выхода.", reply_markup=cancel_keyboard)
+        # Возвращаемся к выбору категории
+        await state.set_state(FinancesForm.choose_category)
+    except ValueError:
+        await message.reply("Пожалуйста, введите числовое значение для суммы расходов.", reply_markup=cancel_keyboard)
 
 async def main():
     await init_db()
